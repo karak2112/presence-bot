@@ -17,6 +17,7 @@ from src.detection.eventsub_ws import EventSubListener, LiveStream, StreamPoller
 from src.health.server import HealthServer
 from src.notify.email_notifier import EmailNotifier
 from src.scheduler.slots import WatchScheduler
+from src.watcher.drops_claimer import DropsClaimer
 from src.watcher.gql import TwitchGQL
 from src.watcher.minute_watched import MinuteWatchedWatcher
 from src.watcher.points_tracker import PointsTracker
@@ -40,6 +41,7 @@ class TwitchPresenceBot:
         self.irc: TwitchIRCManager | None = None
         self.watcher: MinuteWatchedWatcher | None = None
         self.points_tracker: PointsTracker | None = None
+        self.drops_claimer: DropsClaimer | None = None
         self.browser: BrowserSafetyNet | None = None
         self._streamer_map: dict[str, StreamerConfig] = {}
         self._login_by_id: dict[str, str] = {}
@@ -68,6 +70,12 @@ class TwitchPresenceBot:
             interval_seconds=self.config.points_log_interval_seconds,
         )
         self.points_tracker.load()
+        if self.config.drops_enabled:
+            self.drops_claimer = DropsClaimer(
+                gql,
+                interval_seconds=self.config.drops_poll_interval_seconds,
+            )
+            self.drops_claimer.load()
         self.irc = TwitchIRCManager(self.auth.login, self.auth.access_token)
         self.irc.on_raid(self._on_irc_raid)
 
@@ -207,6 +215,17 @@ class TwitchPresenceBot:
                 if self.points_tracker
                 else {}
             ),
+            "drops": (
+                {
+                    "enabled": self.config.drops_enabled,
+                    "gql_available": self.watcher.gql.drops_gql_available
+                    if self.watcher
+                    else False,
+                    **self.drops_claimer.stats,
+                }
+                if self.drops_claimer
+                else {"enabled": False}
+            ),
         }
 
     async def run(self) -> None:
@@ -260,6 +279,14 @@ class TwitchPresenceBot:
                 ),
             ]
 
+            if self.drops_claimer:
+                self._tasks.append(
+                    asyncio.create_task(
+                        self.drops_claimer.run(session, self.get_slots),
+                        name="drops-claimer",
+                    )
+                )
+
             if self.browser:
                 self._tasks.append(
                     asyncio.create_task(
@@ -284,6 +311,8 @@ class TwitchPresenceBot:
                     self.watcher.stop()
                 if self.points_tracker:
                     self.points_tracker.stop()
+                if self.drops_claimer:
+                    self.drops_claimer.stop()
                 if self.irc:
                     self.irc.stop()
                 if self.browser:

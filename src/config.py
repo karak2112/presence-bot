@@ -26,6 +26,7 @@ HEALTH_STATE_PATH = DATA_DIR / "health_state.json"
 POINTS_STATE_PATH = DATA_DIR / "points_state.json"
 BOT_LOG_PATH = DATA_DIR / "bot.log"
 DEVICE_ID_PATH = DATA_DIR / "device_id.txt"
+DROPS_CLAIMED_PATH = DATA_DIR / "drops_claimed.json"
 
 
 @dataclass
@@ -58,6 +59,8 @@ class AppConfig:
     log_level: str = "INFO"
     points_log_interval_seconds: int = 900
     file_log_enabled: bool = True
+    drops_enabled: bool = True
+    drops_poll_interval_seconds: int = 180
 
 
 def load_config(config_path: str = "config/streamers.yaml") -> AppConfig:
@@ -94,6 +97,8 @@ def load_config(config_path: str = "config/streamers.yaml") -> AppConfig:
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         points_log_interval_seconds=int(os.getenv("POINTS_LOG_INTERVAL_SECONDS", "900")),
         file_log_enabled=os.getenv("FILE_LOG_ENABLED", "true").lower() == "true",
+        drops_enabled=os.getenv("DROPS_ENABLED", "true").lower() == "true",
+        drops_poll_interval_seconds=int(os.getenv("DROPS_POLL_INTERVAL_SECONDS", "180")),
     )
 
 

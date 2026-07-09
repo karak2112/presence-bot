@@ -11,6 +11,7 @@ A Docker-based hybrid bot that maintains Twitch watch streaks, channel points, a
 - **Raid following** — detected via IRC while in chat; switches watch slots automatically
 - **Browser safety net** — headless Playwright tab on the top-priority stream
 - **10-minute watchdog** — refreshes watch sessions and browser player
+- **Drops claiming (v1)** — polls inventory while watch slots are active and claims ready rewards
 - **Health endpoint** at `http://localhost:8080/health` and `/status`
 
 ## Quick Start
@@ -79,7 +80,9 @@ See [`.env.example`](.env.example). Key settings:
 | `WATCHDOG_INTERVAL_SECONDS` | 600 | Session refresh interval |
 | `BROWSER_ENABLED` | true | Headless browser safety net |
 | `HEALTH_PORT` | 8080 | Health check HTTP port |
-| `LOG_LEVEL` | INFO | Set to `DEBUG` for verbose reconnect traces |
+| `FILE_LOG_ENABLED` | true | Mirror logs to `data/bot.log` |
+| `DROPS_ENABLED` | true | Auto-claim ready drops while watching |
+| `DROPS_POLL_INTERVAL_SECONDS` | 180 | How often to check drop inventory |
 
 ## Architecture
 

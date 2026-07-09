@@ -18,6 +18,8 @@ GQL_URL = "https://gql.twitch.tv/gql"
 CHANNEL_POINTS_CONTEXT_HASH = (
     "1530a003a7d374b0380b79db0be0534f30ff46e61cffa2bc0e2468a909fbc024"
 )
+INVENTORY_HASH = "d86775d0ef16a63a33ad52e80eaff963b2d5b72fada7c991504a57496e1d8e4b"
+CLAIM_DROP_HASH = "a455deea71bdc9015b78eb49f4acfbce8baa7ccbedd28e549bb025bd0f751930"
 
 SETTINGS_PATTERNS = [
     re.compile(r'src="(https://[\w.]+/config/settings\.[0-9a-f]{32}\.js)"', re.I),
@@ -36,10 +38,16 @@ class TwitchGQL:
         self.device_id = device_id or load_device_id()
         self._channel_points_gql_disabled = False
         self._channel_points_gql_notice_logged = False
+        self._drops_gql_disabled = False
+        self._drops_gql_notice_logged = False
 
     @property
     def channel_points_gql_available(self) -> bool:
         return not self._channel_points_gql_disabled
+
+    @property
+    def drops_gql_available(self) -> bool:
+        return not self._drops_gql_disabled
 
     @property
     def access_token(self) -> str:
@@ -146,6 +154,138 @@ class TwitchGQL:
         if not channel:
             return None
         return channel.get("self", {}).get("communityPoints")
+
+    async def post_gql_persisted(
+        self,
+        session: aiohttp.ClientSession,
+        operation_name: str,
+        sha256_hash: str,
+        variables: dict[str, Any] | None = None,
+        *,
+        disable_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        if disable_key == "drops" and self._drops_gql_disabled:
+            return None
+        if disable_key == "channel_points" and self._channel_points_gql_disabled:
+            return None
+
+        body: dict[str, Any] = {
+            "operationName": operation_name,
+            "extensions": {
+                "persistedQuery": {"version": 1, "sha256Hash": sha256_hash},
+            },
+        }
+        if variables is not None:
+            body["variables"] = variables
+
+        headers = self._gql_headers()
+        async with session.post(GQL_URL, headers=headers, json=body) as resp:
+            text = await resp.text()
+            if resp.status == 401:
+                token_valid = await self.auth._token_is_valid(session)
+                if token_valid:
+                    if disable_key == "drops":
+                        self._drops_gql_disabled = True
+                        if not self._drops_gql_notice_logged:
+                            logger.info(
+                                "Drops GQL is not available with dev-app OAuth tokens. "
+                                "Drop claiming disabled until a compatible token is used."
+                            )
+                            self._drops_gql_notice_logged = True
+                    elif disable_key == "channel_points":
+                        self._channel_points_gql_disabled = True
+                        if not self._channel_points_gql_notice_logged:
+                            logger.info(
+                                "Channel points GQL is not available with dev-app OAuth "
+                                "tokens (token is valid for Helix, IRC, and PubSub). "
+                                "Balances will be tracked via PubSub instead."
+                            )
+                            self._channel_points_gql_notice_logged = True
+                    return None
+
+                if self.auth.tokens:
+                    self.auth.tokens.expires_at = 0
+                await self.auth.ensure_valid(session)
+                headers = self._gql_headers()
+                async with session.post(GQL_URL, headers=headers, json=body) as retry:
+                    text = await retry.text()
+                    if retry.status != 200:
+                        logger.warning(
+                            "GQL %s failed after refresh: HTTP %s %s",
+                            operation_name,
+                            retry.status,
+                            text[:200],
+                        )
+                        return None
+                    data = await retry.json()
+            elif resp.status != 200:
+                logger.warning(
+                    "GQL %s failed: HTTP %s %s",
+                    operation_name,
+                    resp.status,
+                    text[:200],
+                )
+                return None
+            else:
+                data = await resp.json()
+
+        if data.get("errors"):
+            logger.warning("GQL %s errors: %s", operation_name, data["errors"])
+            return None
+        return data
+
+    async def get_inventory(self, session: aiohttp.ClientSession) -> dict[str, Any] | None:
+        data = await self.post_gql_persisted(
+            session,
+            "Inventory",
+            INVENTORY_HASH,
+            {"fetchRewardCampaigns": True},
+            disable_key="drops",
+        )
+        if not data:
+            return None
+        return data.get("data", {}).get("currentUser", {}).get("inventory")
+
+    async def find_claimable_drops(
+        self, session: aiohttp.ClientSession
+    ) -> list[tuple[str, str, str]] | None:
+        inventory = await self.get_inventory(session)
+        if inventory is None:
+            return None
+
+        claimable: list[tuple[str, str, str]] = []
+        campaigns = inventory.get("dropCampaignsInProgress") or []
+        for campaign in campaigns:
+            campaign_name = campaign.get("name", "Unknown campaign")
+            for drop_dict in campaign.get("timeBasedDrops") or []:
+                progress = drop_dict.get("self") or {}
+                if progress.get("isClaimed"):
+                    continue
+                drop_instance_id = progress.get("dropInstanceID")
+                if not drop_instance_id:
+                    continue
+                drop_name = drop_dict.get("name", "Unknown drop")
+                claimable.append((campaign_name, drop_name, drop_instance_id))
+        return claimable
+
+    async def claim_drop(
+        self, session: aiohttp.ClientSession, drop_instance_id: str
+    ) -> bool:
+        data = await self.post_gql_persisted(
+            session,
+            "DropsPage_ClaimDropRewards",
+            CLAIM_DROP_HASH,
+            {"input": {"dropInstanceID": drop_instance_id}},
+            disable_key="drops",
+        )
+        if not data:
+            return False
+
+        claim_result = data.get("data", {}).get("claimDropRewards")
+        if claim_result is None:
+            return False
+        status = claim_result.get("status", "")
+        return status in {"ELIGIBLE_FOR_ALL", "DROP_INSTANCE_ALREADY_CLAIMED"}
 
     async def get_stream_metadata(
         self, session: aiohttp.ClientSession, login: str
