@@ -1,0 +1,32 @@
+# Streamers to monitor. Edit login names to match Twitch channel logins.
+streamers:
+  - login: zchum
+    priority: streak   # streak | subscribed | order
+    watch_streak: true
+    subscribed: true
+
+  - login: OmidLive
+    priority: streak
+    watch_streak: true
+    subscribed: true
+
+  - login: ZChumSecret
+    priority: subscribed
+    watch_streak: true
+    subscribed: true
+
+  - login: omidnotlive
+    priority: subscribed
+    watch_streak: true
+    subscribed: true
+
+  - login: DirtyTr0ut
+    priority: streak
+    watch_streak: true
+    subscribed: true
+
+# Priority weights (higher = more likely to get a watch slot)
+priority_weights:
+  streak: 100
+  subscribed: 50
+  order: 10
