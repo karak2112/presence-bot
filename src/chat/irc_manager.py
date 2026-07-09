@@ -33,11 +33,16 @@ class TwitchIRCManager:
         self._stop = asyncio.Event()
         self._desired_channels: Set[str] = set()
         self._raid_callbacks: list[RaidCallback] = []
+        self._logged_initial_connect = False
 
     def on_raid(self, callback: RaidCallback) -> None:
         self._raid_callbacks.append(callback)
 
     def update_token(self, oauth_token: str) -> None:
+        normalized = oauth_token.removeprefix("oauth:")
+        current = self.oauth_token.removeprefix("oauth:")
+        if normalized == current:
+            return
         self.oauth_token = oauth_token
         if self._writer and not self._writer.is_closing():
             try:
@@ -57,7 +62,10 @@ class TwitchIRCManager:
                 await self._disconnect()
                 await asyncio.sleep(30)
             except _TRANSIENT_IRC_ERRORS as exc:
-                logger.warning("IRC disconnected (%s), reconnecting in 5s", exc.__class__.__name__)
+                logger.debug(
+                    "IRC disconnected (%s), reconnecting in 5s",
+                    exc.__class__.__name__,
+                )
                 logger.debug("IRC disconnect details", exc_info=True)
                 await self._disconnect()
                 await asyncio.sleep(5)
@@ -88,7 +96,11 @@ class TwitchIRCManager:
         await self._send(f"NICK {self.login}")
         await self._send("CAP REQ :twitch.tv/membership twitch.tv/tags twitch.tv/commands")
         await self._send("CAP END")
-        logger.info("IRC connected as %s", self.login)
+        if self._logged_initial_connect:
+            logger.debug("IRC connected as %s", self.login)
+        else:
+            logger.info("IRC connected as %s", self.login)
+            self._logged_initial_connect = True
 
         for channel in self._desired_channels:
             await self._join(channel)
@@ -106,17 +118,18 @@ class TwitchIRCManager:
                 if not await self._send_ping():
                     logger.warning("IRC keepalive failed, reconnecting")
                     break
+                logger.debug("IRC read timeout; client PING keepalive sent")
                 continue
 
             if not line:
-                logger.warning("IRC connection closed by server, reconnecting")
+                logger.debug("IRC connection closed by server, reconnecting")
                 break
 
             text = line.decode("utf-8", errors="replace").strip()
             if text.startswith("PING"):
                 await self._send("PONG :tmi.twitch.tv")
             elif " RECONNECT" in text:
-                logger.info("IRC server requested reconnect")
+                logger.debug("IRC server requested reconnect")
                 break
             elif " LOGIN_UNSUCCESSFUL" in text or "Login unsuccessful" in text:
                 raise RuntimeError(f"IRC login failed: {text}")
