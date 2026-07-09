@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 import aiohttp
-import websockets
 from websockets.asyncio.client import connect
 
 logger = logging.getLogger(__name__)
@@ -46,13 +45,19 @@ class StreamState:
 
 
 class EventSubListener:
-    # EventSub WebSocket allows max_total_cost of 10 per session.
-    # stream.online + stream.offline = 2 per streamer → 5 streamers fills the budget.
+    # Twitch allows 10 subscription points per user for WebSocket transport.
+    # stream.online + stream.offline = 2 per streamer → max 5 with both events.
+    # For more streamers, use stream.online only for the top 10; poller covers offline.
     # Raids are detected via IRC USERNOTICE instead (see irc_manager.py).
-    SUBSCRIPTIONS = [
-        ("stream.online", "1", "broadcaster_user_id"),
-        ("stream.offline", "1", "broadcaster_user_id"),
-    ]
+    SUBSCRIPTION_VERSIONS = {
+        "stream.online": "1",
+        "stream.offline": "1",
+    }
+    CONDITION_FIELDS = {
+        "stream.online": "broadcaster_user_id",
+        "stream.offline": "broadcaster_user_id",
+    }
+    SUBSCRIBE_DELAY_SECONDS = 0.15
 
     def __init__(
         self,
@@ -61,12 +66,14 @@ class EventSubListener:
         broadcaster_ids: dict[str, str],
         login_by_id: dict[str, str],
         state: StreamState,
+        subscription_plan: list[tuple[str, str, str]],
     ) -> None:
         self.client_id = client_id
         self.auth = auth
         self.broadcaster_ids = broadcaster_ids
         self.login_by_id = login_by_id
         self.state = state
+        self.subscription_plan = subscription_plan
         self._session_id: str | None = None
         self._stop = asyncio.Event()
 
@@ -105,10 +112,33 @@ class EventSubListener:
                     logger.warning("EventSub subscription revoked: %s", message)
 
     async def _subscribe_all(self, session: aiohttp.ClientSession) -> None:
-        if not self._session_id:
+        if not self._session_id or not self.subscription_plan:
             return
 
-        # EventSub WebSocket requires a user access token (not app/client-credentials).
+        online = [login for event, login, _ in self.subscription_plan if event == "stream.online"]
+        offline = [login for event, login, _ in self.subscription_plan if event == "stream.offline"]
+        if offline:
+            logger.info(
+                "EventSub: subscribing stream.online + stream.offline for %s",
+                ", ".join(online),
+            )
+        else:
+            poll_only = [
+                login
+                for login in self.broadcaster_ids
+                if login not in online
+            ]
+            logger.info(
+                "EventSub: subscribing stream.online for %s",
+                ", ".join(online),
+            )
+            if poll_only:
+                logger.info(
+                    "EventSub: %d streamer(s) on poll-only (go-live + offline via Helix): %s",
+                    len(poll_only),
+                    ", ".join(poll_only),
+                )
+
         success_count = 0
         for attempt in range(2):
             if attempt > 0 and self.auth.tokens:
@@ -117,17 +147,26 @@ class EventSubListener:
             token = tokens.access_token
             success_count = 0
             had_auth_error = False
-            for event_type, version, condition_field in self.SUBSCRIPTIONS:
-                for login, user_id in self.broadcaster_ids.items():
-                    condition = {condition_field: user_id}
-                    result = await self._create_subscription(
-                        session, token, event_type, version, condition, login
+            for event_type, login, user_id in self.subscription_plan:
+                condition_field = self.CONDITION_FIELDS[event_type]
+                version = self.SUBSCRIPTION_VERSIONS[event_type]
+                condition = {condition_field: user_id}
+                result = await self._create_subscription(
+                    session, token, event_type, version, condition, login
+                )
+                await asyncio.sleep(self.SUBSCRIBE_DELAY_SECONDS)
+                if result is True:
+                    success_count += 1
+                elif result is None:
+                    had_auth_error = True
+                elif result == "budget_exhausted":
+                    logger.warning(
+                        "EventSub: Twitch rejected subscription %s/%s (budget exceeded)",
+                        event_type,
+                        login,
                     )
-                    if result is True:
-                        success_count += 1
-                    elif result is None:
-                        had_auth_error = True
-            if success_count > 0:
+                    break
+            if success_count == len(self.subscription_plan) or success_count > 0:
                 break
             if had_auth_error:
                 logger.warning(
@@ -142,6 +181,19 @@ class EventSubListener:
                 "docker compose run --rm bot python -m src.main auth"
             )
 
+        if success_count < len(self.subscription_plan):
+            logger.warning(
+                "EventSub: %d/%d planned subscriptions active",
+                success_count,
+                len(self.subscription_plan),
+            )
+        else:
+            logger.info(
+                "EventSub: %d/%d subscriptions active",
+                success_count,
+                len(self.subscription_plan),
+            )
+
     async def _create_subscription(
         self,
         session: aiohttp.ClientSession,
@@ -150,8 +202,8 @@ class EventSubListener:
         version: str,
         condition: dict[str, str],
         login: str,
-    ) -> bool | None:
-        """Return True on success, False on other failure, None on auth failure."""
+    ) -> bool | None | str:
+        """Return True on success, False on other failure, None on auth failure, 'budget_exhausted' on 429 cost."""
         body = {
             "type": event_type,
             "version": version,
@@ -179,6 +231,10 @@ class EventSubListener:
                     login,
                 )
                 return None
+            if resp.status == 429:
+                message = str(data.get("message", ""))
+                if "total cost exceeded" in message.lower():
+                    return "budget_exhausted"
             if resp.status not in (202, 409):
                 logger.error(
                     "Failed to subscribe %s for %s: %s",

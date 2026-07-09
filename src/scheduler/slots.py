@@ -9,6 +9,7 @@ from src.detection.eventsub_ws import LiveStream
 logger = logging.getLogger(__name__)
 
 MAX_SLOTS = 2
+MAX_EVENTSUB_BUDGET = 10
 
 
 @dataclass
@@ -78,6 +79,38 @@ class WatchScheduler:
             logger.debug("No active watch slots")
 
         return self.state
+
+    def priority_ranked_logins(self) -> list[str]:
+        """All configured streamers sorted by priority score (highest first)."""
+        ranked = [
+            (login, self._priority_score(streamer))
+            for login, streamer in self.streamer_map.items()
+        ]
+        ranked.sort(key=lambda item: item[1], reverse=True)
+        return [login for login, _ in ranked]
+
+    @staticmethod
+    def build_eventsub_plan(
+        broadcaster_ids: dict[str, str], ranked_logins: list[str]
+    ) -> list[tuple[str, str, str]]:
+        """Return (event_type, login, user_id) tuples that fit the EventSub budget."""
+        ordered = [login for login in ranked_logins if login in broadcaster_ids]
+        for login in broadcaster_ids:
+            if login not in ordered:
+                ordered.append(login)
+
+        plan: list[tuple[str, str, str]] = []
+        if len(ordered) * 2 <= MAX_EVENTSUB_BUDGET:
+            for login in ordered:
+                user_id = broadcaster_ids[login]
+                plan.append(("stream.online", login, user_id))
+                plan.append(("stream.offline", login, user_id))
+            return plan
+
+        # More than 5 streamers: instant go-live for top N; offline via poller for all.
+        for login in ordered[:MAX_EVENTSUB_BUDGET]:
+            plan.append(("stream.online", login, broadcaster_ids[login]))
+        return plan
 
     def handle_raid(self, from_login: str, to_login: str, live_streams: dict[str, LiveStream]) -> SchedulerState:
         for slot in self.state.active_slots:

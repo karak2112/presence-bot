@@ -92,7 +92,7 @@ EventSub WS + Poll  →  Scheduler (2 slots)  →  minute-watched API
 
 ## Important Notes
 
-- **EventSub WebSocket limit**: Twitch allows only 10 subscription points per WebSocket session. With 5 streamers, `stream.online` + `stream.offline` uses the full budget. Raids are detected via IRC instead.
+- **EventSub WebSocket limit**: Twitch allows 10 subscription points per user for WebSocket transport. With 5 or fewer streamers, the bot subscribes to `stream.online` + `stream.offline` for all. With more than 5, it subscribes to `stream.online` for the top 10 by priority; go-live and offline for the rest use the Helix poller (default 60s). Raids are detected via IRC.
 - **Two-stream limit**: Don't watch other Twitch streams on your phone/PC while the bot runs, or streak credit may conflict. The bot logs `watch_conflict_detected` when minute-watched requests fail repeatedly.
 - **PC must stay on**: Docker container runs on your PC. Use `restart: unless-stopped` so it recovers after reboots.
 - **Personal use**: This is for maintaining your own watch streaks, equivalent to leaving tabs open.

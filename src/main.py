@@ -46,6 +46,7 @@ class TwitchPresenceBot:
         self._broadcaster_ids: dict[str, str] = {}
         self._started_at = time.time()
         self._tasks: list[asyncio.Task] = []
+        self._eventsub: EventSubListener | None = None
 
     async def setup(self, session: aiohttp.ClientSession) -> None:
         if not self.auth.load():
@@ -213,12 +214,17 @@ class TwitchPresenceBot:
             self._session = session
             await self.setup(session)
 
-            eventsub = EventSubListener(
+            eventsub_plan = WatchScheduler.build_eventsub_plan(
+                self._broadcaster_ids,
+                self.scheduler.priority_ranked_logins(),
+            )
+            self._eventsub = EventSubListener(
                 self.config.twitch_client_id,
                 self.auth,
                 self._broadcaster_ids,
                 self._login_by_id,
                 self.stream_state,
+                eventsub_plan,
             )
             poller = StreamPoller(
                 self.config.twitch_client_id,
@@ -234,7 +240,7 @@ class TwitchPresenceBot:
             self.scheduler.recompute(self.stream_state.live)
 
             self._tasks = [
-                asyncio.create_task(eventsub.run(session), name="eventsub"),
+                asyncio.create_task(self._eventsub.run(session), name="eventsub"),
                 asyncio.create_task(poller.run(session), name="poller"),
                 asyncio.create_task(self._token_refresh_loop(session), name="token-refresh"),
                 asyncio.create_task(self.irc.run(), name="irc"),
@@ -271,7 +277,8 @@ class TwitchPresenceBot:
             except asyncio.CancelledError:
                 pass
             finally:
-                eventsub.stop()
+                if self._eventsub:
+                    self._eventsub.stop()
                 poller.stop()
                 if self.watcher:
                     self.watcher.stop()

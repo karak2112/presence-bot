@@ -25,8 +25,60 @@ streamers:
     watch_streak: true
     subscribed: true
 
+  - login: DevilsCoast
+    priority: medium
+    watch_streak: true
+    subscribed: true
+
+  - login: DeeDeeDidit
+    priority: medium
+    watch_streak: true
+    subscribed: true
+
+  - login: kayli_j
+    priority: medium
+    watch_streak: true
+    subscribed: true
+
+  - login: Welyn
+    priority: low
+    watch_streak: true
+    subscribed: true
+
+  - login: Paddymazz
+    priority: low
+    watch_streak: true
+    subscribed: true
+
+  - login: Reksmore
+    priority: order
+    watch_streak: true
+    subscribed: true
+
+  - login: Papapoob
+    priority: order
+    watch_streak: true
+    subscribed: true
+
+  - login: JoshCreed1
+    priority: order
+    watch_streak: true
+    subscribed: true
+
+  - login: monstera
+    priority: order
+    watch_streak: true
+    subscribed: true
+
+  - login: rhysrock
+    priority: order
+    watch_streak: true
+    subscribed: true
+
 # Priority weights (higher = more likely to get a watch slot)
 priority_weights:
   streak: 100
   subscribed: 50
+  medium: 30
+  low: 20
   order: 10
