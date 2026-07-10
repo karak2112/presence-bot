@@ -139,7 +139,9 @@ class TwitchPresenceBot:
             to_login = payload["to_login"]
             self.scheduler.handle_raid(from_login, to_login, self.stream_state.live)
             if self.browser:
-                await self.browser.handle_raid(to_login)
+                browser_login = self.get_browser_login()
+                if browser_login and browser_login != self.browser.current_login:
+                    await self.browser.navigate(browser_login)
             await self._sync_presence()
             logger.info("Handled raid %s -> %s", from_login, to_login)
 
@@ -218,6 +220,9 @@ class TwitchPresenceBot:
             "drops": (
                 {
                     "enabled": self.config.drops_enabled,
+                    "web_auth_configured": self.watcher.gql.uses_web_auth
+                    if self.watcher
+                    else False,
                     "gql_available": self.watcher.gql.drops_gql_available
                     if self.watcher
                     else False,
@@ -375,6 +380,38 @@ async def cmd_test_email(config: AppConfig) -> None:
         sys.exit(1)
 
 
+async def cmd_test_web_auth(config: AppConfig) -> None:
+    from src.auth.web_auth import WebAuth
+    from src.watcher.gql import TwitchGQL
+
+    web_auth = WebAuth.load()
+    if not web_auth:
+        print("No web auth token found.")
+        print("Create data/web_auth.json from data/web_auth.json.example")
+        print("or set TWITCH_WEB_AUTH_TOKEN in .env")
+        sys.exit(1)
+
+    auth = TwitchAuth(config.twitch_client_id, config.twitch_client_secret)
+    if not auth.load():
+        print("Device OAuth not set up. Run: python -m src.main auth")
+        sys.exit(1)
+
+    gql = TwitchGQL(auth)
+    async with aiohttp.ClientSession() as session:
+        inventory = await gql.get_inventory(session)
+        if inventory is None:
+            print("Web auth token failed GQL Inventory request.")
+            print("Re-copy the auth-token cookie from your browser and restart the bot.")
+            sys.exit(1)
+
+        campaigns = inventory.get("dropCampaignsInProgress") or []
+        claimable = await gql.find_claimable_drops(session) if campaigns else []
+
+    print("Web auth token works for GQL.")
+    print(f"Drop campaigns in progress: {len(campaigns)}")
+    print(f"Claimable drops right now: {len(claimable or [])}")
+
+
 async def cmd_run(config: AppConfig) -> None:
     bot = TwitchPresenceBot(config)
     await bot.run()
@@ -382,7 +419,11 @@ async def cmd_run(config: AppConfig) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Twitch Watch-Streak & Presence Bot")
-    parser.add_argument("command", choices=["auth", "run", "test-email"], help="auth, run, or test-email")
+    parser.add_argument(
+        "command",
+        choices=["auth", "run", "test-email", "test-web-auth"],
+        help="auth, run, test-email, or test-web-auth",
+    )
     parser.add_argument(
         "--config", default="config/streamers.yaml", help="Path to streamers config"
     )
@@ -395,6 +436,8 @@ def main() -> None:
         asyncio.run(cmd_auth(config))
     elif args.command == "test-email":
         asyncio.run(cmd_test_email(config))
+    elif args.command == "test-web-auth":
+        asyncio.run(cmd_test_web_auth(config))
     else:
         asyncio.run(cmd_run(config))
 

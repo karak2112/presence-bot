@@ -143,10 +143,6 @@ class BrowserSafetyNet:
             logger.exception("Browser refresh failed for %s", self._current_login)
             await self.navigate(self._current_login)
 
-    async def handle_raid(self, to_login: str) -> None:
-        if self._current_login and self._enabled:
-            await self.navigate(to_login)
-
     async def _close_page(self) -> None:
         if self._page:
             try:

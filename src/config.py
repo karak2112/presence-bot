@@ -27,6 +27,7 @@ POINTS_STATE_PATH = DATA_DIR / "points_state.json"
 BOT_LOG_PATH = DATA_DIR / "bot.log"
 DEVICE_ID_PATH = DATA_DIR / "device_id.txt"
 DROPS_CLAIMED_PATH = DATA_DIR / "drops_claimed.json"
+WEB_AUTH_PATH = DATA_DIR / "web_auth.json"
 
 
 @dataclass

@@ -113,6 +113,18 @@ class WatchScheduler:
         return plan
 
     def handle_raid(self, from_login: str, to_login: str, live_streams: dict[str, LiveStream]) -> SchedulerState:
+        from_login = from_login.lower()
+        to_login = to_login.lower()
+
+        if to_login not in self.streamer_map:
+            logger.info(
+                "Raid not followed (target not monitored): %s -> %s",
+                from_login,
+                to_login,
+            )
+            self.recompute(live_streams)
+            return self.state
+
         for slot in self.state.active_slots:
             if slot.login == from_login:
                 slot.login = to_login
@@ -124,7 +136,5 @@ class WatchScheduler:
                 logger.info("Raid: switched slot from %s to %s", from_login, to_login)
                 break
 
-        if self.state.browser_login == from_login:
-            self.state.browser_login = to_login
-
+        self.state.browser_login = self.state.top_priority_login()
         return self.state

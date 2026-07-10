@@ -6,7 +6,8 @@ from typing import Any, TYPE_CHECKING
 
 import aiohttp
 
-from src.config import TWITCH_USER_AGENT, load_device_id
+from src.config import TWITCH_USER_AGENT, TWITCH_GQL_CLIENT_ID, load_device_id
+from src.auth.web_auth import WebAuth
 
 if TYPE_CHECKING:
     from src.auth.twitch_auth import TwitchAuth
@@ -36,18 +37,27 @@ class TwitchGQL:
     def __init__(self, auth: "TwitchAuth", device_id: str | None = None) -> None:
         self.auth = auth
         self.device_id = device_id or load_device_id()
+        self._web_auth = WebAuth.load()
         self._channel_points_gql_disabled = False
         self._channel_points_gql_notice_logged = False
         self._drops_gql_disabled = False
         self._drops_gql_notice_logged = False
+        if self._web_auth:
+            logger.info(
+                "GQL will use web session token (data/web_auth.json or TWITCH_WEB_AUTH_TOKEN)"
+            )
+
+    @property
+    def uses_web_auth(self) -> bool:
+        return self._web_auth is not None
 
     @property
     def channel_points_gql_available(self) -> bool:
-        return not self._channel_points_gql_disabled
+        return self.uses_web_auth and not self._channel_points_gql_disabled
 
     @property
     def drops_gql_available(self) -> bool:
-        return not self._drops_gql_disabled
+        return self.uses_web_auth and not self._drops_gql_disabled
 
     @property
     def access_token(self) -> str:
@@ -65,8 +75,17 @@ class TwitchGQL:
         }
 
     def _gql_headers(self) -> dict[str, str]:
-        # GQL requires Client-Id to match the OAuth token's issuing application.
         from src.config import TWITCH_CLIENT_VERSION
+
+        if self._web_auth:
+            return {
+                "Authorization": f"OAuth {self._web_auth.auth_token}",
+                "Client-Id": TWITCH_GQL_CLIENT_ID,
+                "Client-Version": TWITCH_CLIENT_VERSION,
+                "User-Agent": TWITCH_USER_AGENT,
+                "X-Device-Id": self.device_id,
+                "Content-Type": "application/json",
+            }
 
         return {
             "Authorization": f"OAuth {self.auth.access_token}",
@@ -77,78 +96,55 @@ class TwitchGQL:
             "Content-Type": "application/json",
         }
 
+    def _disable_gql(self, disable_key: str | None, *, web_token_rejected: bool) -> None:
+        if disable_key == "drops":
+            self._drops_gql_disabled = True
+            if self._drops_gql_notice_logged:
+                return
+            self._drops_gql_notice_logged = True
+            if web_token_rejected:
+                logger.warning(
+                    "Drops GQL rejected the web session token. "
+                    "Re-copy auth-token from your browser into data/web_auth.json."
+                )
+            else:
+                logger.info(
+                    "Drops GQL requires a web session token. "
+                    "Add data/web_auth.json (see data/web_auth.json.example)."
+                )
+        elif disable_key == "channel_points":
+            self._channel_points_gql_disabled = True
+            if self._channel_points_gql_notice_logged:
+                return
+            self._channel_points_gql_notice_logged = True
+            if web_token_rejected:
+                logger.warning(
+                    "Channel points GQL rejected the web session token. "
+                    "Balances will use PubSub until you refresh data/web_auth.json."
+                )
+            else:
+                logger.info(
+                    "Channel points GQL requires a web session token for balance fetch. "
+                    "Balances will be tracked via PubSub instead."
+                )
+
     async def get_channel_points_context(
         self, session: aiohttp.ClientSession, login: str
     ) -> dict[str, Any] | None:
-        if self._channel_points_gql_disabled:
+        if not self.uses_web_auth or self._channel_points_gql_disabled:
             return None
 
-        body = {
-            "operationName": "ChannelPointsContext",
-            "variables": {"channelLogin": login},
-            "extensions": {
-                "persistedQuery": {
-                    "version": 1,
-                    "sha256Hash": CHANNEL_POINTS_CONTEXT_HASH,
-                }
-            },
-        }
-        headers = self._gql_headers()
-        async with session.post(GQL_URL, headers=headers, json=body) as resp:
-            text = await resp.text()
-            if resp.status == 401:
-                token_valid = await self.auth._token_is_valid(session)
-                if token_valid:
-                    self._channel_points_gql_disabled = True
-                    if not self._channel_points_gql_notice_logged:
-                        logger.info(
-                            "Channel points GQL is not available with dev-app OAuth "
-                            "tokens (token is valid for Helix, IRC, and PubSub). "
-                            "Balances will be tracked via PubSub instead."
-                        )
-                        self._channel_points_gql_notice_logged = True
-                    return None
-
-                logger.warning(
-                    "GQL token expired for %s channel points, refreshing",
-                    login,
-                )
-                if self.auth.tokens:
-                    self.auth.tokens.expires_at = 0
-                await self.auth.ensure_valid(session)
-                headers = self._gql_headers()
-                async with session.post(GQL_URL, headers=headers, json=body) as retry:
-                    text = await retry.text()
-                    if retry.status != 200:
-                        logger.warning(
-                            "Channel points GQL failed for %s after refresh: HTTP %s %s",
-                            login,
-                            retry.status,
-                            text[:200],
-                        )
-                        return None
-                    data = await retry.json()
-            elif resp.status != 200:
-                logger.warning(
-                    "Channel points GQL failed for %s: HTTP %s %s",
-                    login,
-                    resp.status,
-                    text[:200],
-                )
-                return None
-            else:
-                data = await resp.json()
-
-        if data.get("errors"):
-            logger.warning(
-                "Channel points GQL errors for %s: %s",
-                login,
-                data["errors"],
-            )
+        data = await self.post_gql_persisted(
+            session,
+            "ChannelPointsContext",
+            CHANNEL_POINTS_CONTEXT_HASH,
+            {"channelLogin": login},
+            disable_key="channel_points",
+        )
+        if not data:
             return None
         community = data.get("data", {}).get("community")
         if not community:
-            logger.warning("Channel points GQL returned no community for %s", login)
             return None
         channel = community.get("channel")
         if not channel:
@@ -164,6 +160,10 @@ class TwitchGQL:
         *,
         disable_key: str | None = None,
     ) -> dict[str, Any] | None:
+        if not self.uses_web_auth:
+            if disable_key:
+                self._disable_gql(disable_key, web_token_rejected=False)
+            return None
         if disable_key == "drops" and self._drops_gql_disabled:
             return None
         if disable_key == "channel_points" and self._channel_points_gql_disabled:
@@ -182,43 +182,9 @@ class TwitchGQL:
         async with session.post(GQL_URL, headers=headers, json=body) as resp:
             text = await resp.text()
             if resp.status == 401:
-                token_valid = await self.auth._token_is_valid(session)
-                if token_valid:
-                    if disable_key == "drops":
-                        self._drops_gql_disabled = True
-                        if not self._drops_gql_notice_logged:
-                            logger.info(
-                                "Drops GQL is not available with dev-app OAuth tokens. "
-                                "Drop claiming disabled until a compatible token is used."
-                            )
-                            self._drops_gql_notice_logged = True
-                    elif disable_key == "channel_points":
-                        self._channel_points_gql_disabled = True
-                        if not self._channel_points_gql_notice_logged:
-                            logger.info(
-                                "Channel points GQL is not available with dev-app OAuth "
-                                "tokens (token is valid for Helix, IRC, and PubSub). "
-                                "Balances will be tracked via PubSub instead."
-                            )
-                            self._channel_points_gql_notice_logged = True
-                    return None
-
-                if self.auth.tokens:
-                    self.auth.tokens.expires_at = 0
-                await self.auth.ensure_valid(session)
-                headers = self._gql_headers()
-                async with session.post(GQL_URL, headers=headers, json=body) as retry:
-                    text = await retry.text()
-                    if retry.status != 200:
-                        logger.warning(
-                            "GQL %s failed after refresh: HTTP %s %s",
-                            operation_name,
-                            retry.status,
-                            text[:200],
-                        )
-                        return None
-                    data = await retry.json()
-            elif resp.status != 200:
+                self._disable_gql(disable_key, web_token_rejected=self.uses_web_auth)
+                return None
+            if resp.status != 200:
                 logger.warning(
                     "GQL %s failed: HTTP %s %s",
                     operation_name,

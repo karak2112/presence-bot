@@ -100,6 +100,62 @@ EventSub WS + Poll  →  Scheduler (2 slots)  →  minute-watched API
 - **PC must stay on**: Docker container runs on your PC. Use `restart: unless-stopped` so it recovers after reboots.
 - **Personal use**: This is for maintaining your own watch streaks, equivalent to leaving tabs open.
 
+## Drops claiming (Phase 1 — manual web token)
+
+Device OAuth cannot call Twitch GQL for drops. The bot uses your **browser session** `auth-token` cookie instead.
+
+### 1. Copy the token from your browser
+
+1. In Chrome or Edge, log into [twitch.tv](https://www.twitch.tv) as the **same account** the bot uses (e.g. `karak2112`).
+2. Press **F12** → **Application** tab (Firefox: **Storage**).
+3. Under **Cookies**, select `https://www.twitch.tv`.
+4. Find the cookie named **`auth-token`** and copy its **Value** (a long string; do **not** add an `oauth:` prefix).
+
+### 2. Paste it into the bot
+
+**Option A — file (recommended)**
+
+```bash
+cp data/web_auth.json.example data/web_auth.json
+```
+
+Edit `data/web_auth.json`:
+
+```json
+{
+  "auth_token": "PASTE_THE_AUTH_TOKEN_VALUE_HERE"
+}
+```
+
+**Option B — environment variable**
+
+Add to `.env`:
+
+```env
+TWITCH_WEB_AUTH_TOKEN=PASTE_THE_AUTH_TOKEN_VALUE_HERE
+```
+
+The file takes precedence if both are set.
+
+### 3. Rebuild and verify
+
+```bash
+docker compose build && docker compose up -d
+docker compose run --rm bot python -m src.main test-web-auth
+```
+
+On success you should see `Web auth token works for GQL.` In logs, look for:
+
+`GQL will use web session token (data/web_auth.json or TWITCH_WEB_AUTH_TOKEN)`
+
+Check `http://localhost:8080/status` — `drops.web_auth_configured` and `drops.gql_available` should be `true`.
+
+Drops are polled every 3 minutes while watch slots are active. Claimed drops are recorded in `data/drops_claimed.json`.
+
+**Token expiry:** If drops stop claiming, copy a fresh `auth-token` from the browser, update the file or `.env`, then rebuild/restart.
+
+**Phase 2 (later):** A Playwright command to capture the cookie automatically.
+
 ## Commands
 
 ```bash
@@ -108,6 +164,9 @@ docker compose run --rm bot python -m src.main auth
 
 # Send a test email (verify SMTP config)
 docker compose run --rm bot python -m src.main test-email
+
+# Verify web auth token for drops GQL
+docker compose run --rm bot python -m src.main test-web-auth
 
 # Run in foreground (debug)
 docker compose up
