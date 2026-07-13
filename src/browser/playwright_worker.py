@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -10,8 +11,15 @@ logger = logging.getLogger(__name__)
 class BrowserSafetyNet:
     """Headless Playwright browser for the top-priority watch slot."""
 
-    def __init__(self, access_token: str, refresh_interval: int = 600) -> None:
-        self.access_token = access_token
+    def __init__(
+        self,
+        access_token: str,
+        *,
+        web_auth_token: str | None = None,
+        refresh_interval: int = 600,
+    ) -> None:
+        self._device_token = access_token
+        self._web_auth_token = web_auth_token
         self.refresh_interval = refresh_interval
         self._current_login: str | None = None
         self._playwright = None
@@ -22,6 +30,21 @@ class BrowserSafetyNet:
         self._stop = asyncio.Event()
         self._enabled = True
         self._ready = False
+        self.stats: dict[str, Any] = {
+            "uses_web_auth": bool(web_auth_token),
+        }
+
+    @property
+    def access_token(self) -> str:
+        return self._device_token
+
+    @access_token.setter
+    def access_token(self, value: str) -> None:
+        self._device_token = value
+
+    @property
+    def session_token(self) -> str:
+        return self._web_auth_token or self._device_token
 
     @property
     def current_login(self) -> str | None:
@@ -47,13 +70,15 @@ class BrowserSafetyNet:
             self._browser = await self._playwright.chromium.launch(
                 headless=True,
                 args=[
+                    "--headless=new",
                     "--mute-audio",
                     "--disable-dev-shm-usage",
                     "--no-sandbox",
                 ],
             )
             self._ready = True
-            logger.info("Browser safety net started")
+            auth_source = "web auth" if self._web_auth_token else "device OAuth"
+            logger.info("Browser safety net started (%s session)", auth_source)
             return True
         except Exception:
             logger.exception(
@@ -95,7 +120,26 @@ class BrowserSafetyNet:
             elif not login and self._current_login:
                 await self._close_page()
                 self._current_login = None
+
             await asyncio.sleep(15)
+
+    async def _wait_for_stream_spa(self) -> bool:
+        page = self._page
+        if page is None:
+            return False
+        try:
+            await page.wait_for_selector(
+                ".stream-chat, .persistent-player, [data-a-target='player-overlay-click-handler']",
+                timeout=45000,
+            )
+            await page.wait_for_timeout(5000)
+            return True
+        except Exception:
+            logger.warning(
+                "Stream SPA did not finish loading for %s",
+                self._current_login,
+            )
+            return False
 
     async def navigate(self, login: str) -> None:
         if not self._enabled or not self._browser:
@@ -103,6 +147,7 @@ class BrowserSafetyNet:
         await self._close_page()
         self._context = await self._browser.new_context(
             viewport={"width": 1280, "height": 720},
+            locale="en-US",
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -112,7 +157,7 @@ class BrowserSafetyNet:
         await self._context.add_cookies([
             {
                 "name": "auth-token",
-                "value": self.access_token,
+                "value": self.session_token,
                 "domain": ".twitch.tv",
                 "path": "/",
                 "httpOnly": False,
@@ -124,7 +169,7 @@ class BrowserSafetyNet:
         url = f"https://www.twitch.tv/{login}"
         try:
             await self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            await self._page.wait_for_timeout(5000)
+            await self._wait_for_stream_spa()
             self._current_login = login
             self._last_refresh = time.time()
             logger.info("Browser watching %s", login)

@@ -11,7 +11,7 @@ A Docker-based hybrid bot that maintains Twitch watch streaks, channel points, a
 - **Raid following** — detected via IRC while in chat; switches watch slots automatically
 - **Browser safety net** — headless Playwright tab on the top-priority stream
 - **10-minute watchdog** — refreshes watch sessions and browser player
-- **Drops claiming (v1)** — polls inventory while watch slots are active and claims ready rewards
+- **Drops progress tracking** — polls inventory via GQL and logs watch progress
 - **Health endpoint** at `http://localhost:8080/health` and `/status`
 
 ## Quick Start
@@ -81,7 +81,7 @@ See [`.env.example`](.env.example). Key settings:
 | `BROWSER_ENABLED` | true | Headless browser safety net |
 | `HEALTH_PORT` | 8080 | Health check HTTP port |
 | `FILE_LOG_ENABLED` | true | Mirror logs to `data/bot.log` |
-| `DROPS_ENABLED` | true | Auto-claim ready drops while watching |
+| `DROPS_ENABLED` | true | Poll drop inventory and log progress |
 | `DROPS_POLL_INTERVAL_SECONDS` | 180 | How often to check drop inventory |
 
 ## Architecture
@@ -100,9 +100,11 @@ EventSub WS + Poll  →  Scheduler (2 slots)  →  minute-watched API
 - **PC must stay on**: Docker container runs on your PC. Use `restart: unless-stopped` so it recovers after reboots.
 - **Personal use**: This is for maintaining your own watch streaks, equivalent to leaving tabs open.
 
-## Drops claiming (Phase 1 — manual web token)
+## Drops progress (GQL reads)
 
-Device OAuth cannot call Twitch GQL for drops. The bot uses your **browser session** `auth-token` cookie instead.
+Device OAuth cannot call Twitch GQL for drops inventory. The bot uses your **browser session** `auth-token` cookie for read-only inventory polling.
+
+Claim drops and bonus chests in your normal browser (e.g. BTTV). The bot does not attempt GQL mutations — Twitch blocks them from headless/automation sessions.
 
 ### 1. Copy the token from your browser
 
@@ -150,11 +152,15 @@ On success you should see `Web auth token works for GQL.` In logs, look for:
 
 Check `http://localhost:8080/status` — `drops.web_auth_configured` and `drops.gql_available` should be `true`.
 
-Drops are polled every 3 minutes while watch slots are active. Claimed drops are recorded in `data/drops_claimed.json`.
+Drops are polled every 3 minutes while watch slots are active. Progress is logged when minutes change (`Drop Campaign / Item: X/Y min`). Check `/status` → `drops.campaigns_in_progress` and `drops.ready_to_claim_count`.
 
-**Token expiry:** If drops stop claiming, copy a fresh `auth-token` from the browser, update the file or `.env`, then rebuild/restart.
+**Note:** Drop *progress* (minutes watched toward a drop) may only credit when Twitch sees an active video player session. The bot logs inventory progress so you can tell whether headless watching is counting.
 
-**Phase 2 (later):** A Playwright command to capture the cookie automatically.
+## Channel points
+
+Balances and `+N (WATCH)` / `+N (CLAIM)` events are tracked via PubSub. Optional GQL reads (`ChannelPointsContext`) work with web auth for balance on `/status`. Bonus chest claiming is left to BTTV or manual clicks in your browser.
+
+**Token expiry:** If drops inventory stops updating, copy a fresh `auth-token` from the browser into `data/web_auth.json`, then restart the bot.
 
 ## Commands
 
@@ -165,7 +171,7 @@ docker compose run --rm bot python -m src.main auth
 # Send a test email (verify SMTP config)
 docker compose run --rm bot python -m src.main test-email
 
-# Verify web auth token for drops GQL
+# Verify web auth token for drops GQL reads
 docker compose run --rm bot python -m src.main test-web-auth
 
 # Run in foreground (debug)

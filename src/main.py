@@ -10,6 +10,7 @@ from typing import Any
 import aiohttp
 
 from src.auth.twitch_auth import TwitchAuth
+from src.auth.web_auth import WebAuth
 from src.browser.playwright_worker import BrowserSafetyNet
 from src.chat.irc_manager import TwitchIRCManager
 from src.config import AppConfig, StreamerConfig, load_config, setup_logging
@@ -17,7 +18,7 @@ from src.detection.eventsub_ws import EventSubListener, LiveStream, StreamPoller
 from src.health.server import HealthServer
 from src.notify.email_notifier import EmailNotifier
 from src.scheduler.slots import WatchScheduler
-from src.watcher.drops_claimer import DropsClaimer
+from src.watcher.drops_tracker import DropsTracker
 from src.watcher.gql import TwitchGQL
 from src.watcher.minute_watched import MinuteWatchedWatcher
 from src.watcher.points_tracker import PointsTracker
@@ -41,7 +42,7 @@ class TwitchPresenceBot:
         self.irc: TwitchIRCManager | None = None
         self.watcher: MinuteWatchedWatcher | None = None
         self.points_tracker: PointsTracker | None = None
-        self.drops_claimer: DropsClaimer | None = None
+        self.drops_tracker: DropsTracker | None = None
         self.browser: BrowserSafetyNet | None = None
         self._streamer_map: dict[str, StreamerConfig] = {}
         self._login_by_id: dict[str, str] = {}
@@ -71,17 +72,18 @@ class TwitchPresenceBot:
         )
         self.points_tracker.load()
         if self.config.drops_enabled:
-            self.drops_claimer = DropsClaimer(
+            self.drops_tracker = DropsTracker(
                 gql,
                 interval_seconds=self.config.drops_poll_interval_seconds,
             )
-            self.drops_claimer.load()
         self.irc = TwitchIRCManager(self.auth.login, self.auth.access_token)
         self.irc.on_raid(self._on_irc_raid)
 
         if self.config.browser_enabled:
+            web_auth = WebAuth.load()
             self.browser = BrowserSafetyNet(
                 self.auth.access_token,
+                web_auth_token=web_auth.auth_token if web_auth else None,
                 refresh_interval=self.config.watchdog_interval_seconds,
             )
             started = await self.browser.start()
@@ -159,7 +161,7 @@ class TwitchPresenceBot:
     async def _sync_presence(self) -> None:
         try:
             tokens = await self.auth.ensure_valid(self._session)
-            if self.browser:
+            if self.browser and not self.browser.stats.get("uses_web_auth"):
                 self.browser.access_token = tokens.access_token
             if self.irc and self.irc.oauth_token != tokens.access_token:
                 self.irc.update_token(tokens.access_token)
@@ -198,6 +200,14 @@ class TwitchPresenceBot:
             "browser_login": self.scheduler.state.browser_login,
             "browser_ready": self.browser.ready if self.browser else False,
             "browser_enabled": self.browser._enabled if self.browser else False,
+            "browser": (
+                {
+                    **self.browser.stats,
+                    "current_login": self.browser.current_login,
+                }
+                if self.browser
+                else {"enabled": False}
+            ),
             "irc_joined": sorted(self.irc._joined) if self.irc else [],
             "total_minutes_watched": self.watcher.stats.total_minutes if self.watcher else 0,
             "watch_conflict_detected": (
@@ -226,9 +236,9 @@ class TwitchPresenceBot:
                     "gql_available": self.watcher.gql.drops_gql_available
                     if self.watcher
                     else False,
-                    **self.drops_claimer.stats,
+                    **self.drops_tracker.stats,
                 }
-                if self.drops_claimer
+                if self.drops_tracker
                 else {"enabled": False}
             ),
         }
@@ -284,11 +294,11 @@ class TwitchPresenceBot:
                 ),
             ]
 
-            if self.drops_claimer:
+            if self.drops_tracker:
                 self._tasks.append(
                     asyncio.create_task(
-                        self.drops_claimer.run(session, self.get_slots),
-                        name="drops-claimer",
+                        self.drops_tracker.run(session, self.get_slots),
+                        name="drops-tracker",
                     )
                 )
 
@@ -316,8 +326,8 @@ class TwitchPresenceBot:
                     self.watcher.stop()
                 if self.points_tracker:
                     self.points_tracker.stop()
-                if self.drops_claimer:
-                    self.drops_claimer.stop()
+                if self.drops_tracker:
+                    self.drops_tracker.stop()
                 if self.irc:
                     self.irc.stop()
                 if self.browser:
@@ -329,7 +339,7 @@ class TwitchPresenceBot:
             await asyncio.sleep(300)
             try:
                 tokens = await self.auth.ensure_valid(session)
-                if self.browser:
+                if self.browser and not self.browser.stats.get("uses_web_auth"):
                     self.browser.access_token = tokens.access_token
                 if self.irc:
                     self.irc.update_token(tokens.access_token)
@@ -404,12 +414,12 @@ async def cmd_test_web_auth(config: AppConfig) -> None:
             print("Re-copy the auth-token cookie from your browser and restart the bot.")
             sys.exit(1)
 
-        campaigns = inventory.get("dropCampaignsInProgress") or []
-        claimable = await gql.find_claimable_drops(session) if campaigns else []
+        campaigns = gql.summarize_drop_progress(inventory)
+        ready_to_claim = sum(1 for c in campaigns if c["ready_to_claim"])
 
     print("Web auth token works for GQL.")
     print(f"Drop campaigns in progress: {len(campaigns)}")
-    print(f"Claimable drops right now: {len(claimable or [])}")
+    print(f"Ready to claim (use BTTV/browser): {ready_to_claim}")
 
 
 async def cmd_run(config: AppConfig) -> None:

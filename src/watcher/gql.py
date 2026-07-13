@@ -20,7 +20,6 @@ CHANNEL_POINTS_CONTEXT_HASH = (
     "1530a003a7d374b0380b79db0be0534f30ff46e61cffa2bc0e2468a909fbc024"
 )
 INVENTORY_HASH = "d86775d0ef16a63a33ad52e80eaff963b2d5b72fada7c991504a57496e1d8e4b"
-CLAIM_DROP_HASH = "a455deea71bdc9015b78eb49f4acfbce8baa7ccbedd28e549bb025bd0f751930"
 
 SETTINGS_PATTERNS = [
     re.compile(r'src="(https://[\w.]+/config/settings\.[0-9a-f]{32}\.js)"', re.I),
@@ -151,6 +150,28 @@ class TwitchGQL:
             return None
         return channel.get("self", {}).get("communityPoints")
 
+    @staticmethod
+    def summarize_drop_progress(inventory: dict[str, Any]) -> list[dict[str, Any]]:
+        summary: list[dict[str, Any]] = []
+        for campaign in inventory.get("dropCampaignsInProgress") or []:
+            campaign_name = campaign.get("name", "Unknown campaign")
+            for drop_dict in campaign.get("timeBasedDrops") or []:
+                progress = drop_dict.get("self") or {}
+                required = drop_dict.get("requiredMinutesWatched", 0)
+                watched = progress.get("currentMinutesWatched", 0)
+                summary.append(
+                    {
+                        "campaign": campaign_name,
+                        "drop": drop_dict.get("name", "Unknown drop"),
+                        "minutes_watched": watched,
+                        "minutes_required": required,
+                        "is_claimed": progress.get("isClaimed", False),
+                        "ready_to_claim": bool(progress.get("dropInstanceID"))
+                        and not progress.get("isClaimed"),
+                    }
+                )
+        return summary
+
     async def post_gql_persisted(
         self,
         session: aiohttp.ClientSession,
@@ -211,47 +232,6 @@ class TwitchGQL:
         if not data:
             return None
         return data.get("data", {}).get("currentUser", {}).get("inventory")
-
-    async def find_claimable_drops(
-        self, session: aiohttp.ClientSession
-    ) -> list[tuple[str, str, str]] | None:
-        inventory = await self.get_inventory(session)
-        if inventory is None:
-            return None
-
-        claimable: list[tuple[str, str, str]] = []
-        campaigns = inventory.get("dropCampaignsInProgress") or []
-        for campaign in campaigns:
-            campaign_name = campaign.get("name", "Unknown campaign")
-            for drop_dict in campaign.get("timeBasedDrops") or []:
-                progress = drop_dict.get("self") or {}
-                if progress.get("isClaimed"):
-                    continue
-                drop_instance_id = progress.get("dropInstanceID")
-                if not drop_instance_id:
-                    continue
-                drop_name = drop_dict.get("name", "Unknown drop")
-                claimable.append((campaign_name, drop_name, drop_instance_id))
-        return claimable
-
-    async def claim_drop(
-        self, session: aiohttp.ClientSession, drop_instance_id: str
-    ) -> bool:
-        data = await self.post_gql_persisted(
-            session,
-            "DropsPage_ClaimDropRewards",
-            CLAIM_DROP_HASH,
-            {"input": {"dropInstanceID": drop_instance_id}},
-            disable_key="drops",
-        )
-        if not data:
-            return False
-
-        claim_result = data.get("data", {}).get("claimDropRewards")
-        if claim_result is None:
-            return False
-        status = claim_result.get("status", "")
-        return status in {"ELIGIBLE_FOR_ALL", "DROP_INSTANCE_ALREADY_CLAIMED"}
 
     async def get_stream_metadata(
         self, session: aiohttp.ClientSession, login: str
